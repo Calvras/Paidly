@@ -721,6 +721,14 @@ export function ConnectCardScreen() {
           </Button>
         </div>
       )}
+
+      {/* MFA Re-Prompt Modal for sensitive bank link */}
+      <MfaModal
+        isOpen={showPlaidMfaModal}
+        onClose={() => setShowPlaidMfaModal(false)}
+        onSuccess={handlePlaidMfaSuccess}
+        actionType="connect_bank"
+      />
     </main>
   )
 }

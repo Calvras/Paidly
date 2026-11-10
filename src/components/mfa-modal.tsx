@@ -3,7 +3,6 @@ import {
   ShieldCheck,
   Mail,
   KeyRound,
-  Fingerprint,
   X,
   Loader2,
   CheckCircle2,
@@ -21,13 +20,10 @@ import {
 } from "@/components/ui/input-otp";
 import {
   MfaMethod,
-  generateEmailOtp,
-  getPendingEmailOtp,
-  verifyEmailOtp,
-  verifyTotp,
-  verifyPasskey,
-  getTotpSecret,
-  isPasskeySupported,
+  requestServerEmailOtp,
+  verifyServerEmailOtp,
+  getServerTotpSetup,
+  verifyServerTotp,
 } from "@/lib/mfa";
 import { getStoredProfile } from "@/lib/cards-store";
 
@@ -39,6 +35,7 @@ export interface MfaModalProps {
   title?: string;
   description?: string;
   targetEmail?: string;
+  userId?: string;
 }
 
 export function MfaModal({
@@ -49,47 +46,63 @@ export function MfaModal({
   title,
   description,
   targetEmail,
+  userId,
 }: MfaModalProps) {
   const [activeTab, setActiveTab] = useState<MfaMethod>("email_otp");
   const [otpCode, setOtpCode] = useState("");
   const [totpCode, setTotpCode] = useState("");
+  const [totpSecret, setTotpSecret] = useState<string>("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [infoMsg, setInfoMsg] = useState<string | null>(null);
   const [successAnim, setSuccessAnim] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(30);
-  const [demoCodeHint, setDemoCodeHint] = useState<string | null>(null);
   const [copiedSecret, setCopiedSecret] = useState(false);
-  const [passkeySupported, setPasskeySupported] = useState(true);
 
-  // Email to target
+  // Target user details
   const profile = getStoredProfile();
-  const emailToUse = targetEmail || profile.email || "user@example.com";
+  const emailToUse = (targetEmail || profile.email || "user@example.com").trim().toLowerCase();
+  const effectiveUserId = (userId || emailToUse).trim().toLowerCase();
 
-  // Check WebAuthn support
-  useEffect(() => {
-    isPasskeySupported().then(setPasskeySupported);
-  }, []);
-
-  // Initialize or retrieve pending OTP when modal opens or email tab is selected
+  // Send Email OTP or load TOTP setup on modal open
   useEffect(() => {
     if (!isOpen) {
       setOtpCode("");
       setTotpCode("");
       setErrorMsg(null);
+      setInfoMsg(null);
       setSuccessAnim(false);
       return;
     }
 
     if (activeTab === "email_otp") {
-      let pending = getPendingEmailOtp();
-      if (!pending) {
-        const newCode = generateEmailOtp(emailToUse);
-        setDemoCodeHint(newCode);
-      } else {
-        setDemoCodeHint(pending.code);
-      }
+      setIsSendingEmail(true);
+      setErrorMsg(null);
+      requestServerEmailOtp(emailToUse, effectiveUserId)
+        .then((res) => {
+          setIsSendingEmail(false);
+          if (res.success) {
+            setInfoMsg(res.message);
+            setResendCooldown(30);
+          } else {
+            setErrorMsg(res.error || "Failed to dispatch email code.");
+          }
+        })
+        .catch(() => {
+          setIsSendingEmail(false);
+          setErrorMsg("Failed to contact authentication server.");
+        });
+    } else if (activeTab === "totp") {
+      getServerTotpSetup(effectiveUserId, emailToUse)
+        .then((setup) => {
+          setTotpSecret(setup.secret);
+        })
+        .catch((err) => {
+          setErrorMsg(err?.message || "Failed to load authenticator credentials.");
+        });
     }
-  }, [isOpen, activeTab, emailToUse]);
+  }, [isOpen, activeTab, emailToUse, effectiveUserId]);
 
   // Resend countdown timer
   useEffect(() => {
@@ -103,18 +116,27 @@ export function MfaModal({
   if (!isOpen) return null;
 
   // Handle Resend Email Code
-  const handleResend = () => {
-    if (resendCooldown > 0) return;
+  const handleResend = async () => {
+    if (resendCooldown > 0 || isSendingEmail) return;
     setErrorMsg(null);
-    const newCode = generateEmailOtp(emailToUse);
-    setDemoCodeHint(newCode);
-    setResendCooldown(30);
-    setOtpCode("");
+    setInfoMsg(null);
+    setIsSendingEmail(true);
+
+    const res = await requestServerEmailOtp(emailToUse, effectiveUserId);
+    setIsSendingEmail(false);
+
+    if (res.success) {
+      setInfoMsg(res.message);
+      setResendCooldown(30);
+      setOtpCode("");
+    } else {
+      setErrorMsg(res.error || "Failed to resend code.");
+    }
   };
 
-  // Handle Email OTP verification
+  // Handle Email OTP verification strictly on server
   const handleVerifyEmail = async (codeToVerify?: string) => {
-    const code = codeToVerify || otpCode;
+    const code = (codeToVerify || otpCode).trim();
     if (code.length !== 6) {
       setErrorMsg("Please enter the complete 6-digit code.");
       return;
@@ -122,28 +144,25 @@ export function MfaModal({
 
     setIsLoading(true);
     setErrorMsg(null);
+    setInfoMsg(null);
 
-    // Brief simulation delay for realistic verification
-    await new Promise((r) => setTimeout(r, 450));
-
-    const res = verifyEmailOtp(code);
+    const res = await verifyServerEmailOtp(emailToUse, code, effectiveUserId);
     setIsLoading(false);
 
     if (!res.success || !res.token) {
-      setErrorMsg(res.error || "Incorrect code. Try again or use 123456.");
+      setErrorMsg(res.error || "Verification failed. Please check the code.");
       return;
     }
 
-    // Success
     setSuccessAnim(true);
     setTimeout(() => {
       onSuccess(res.token!);
-    }, 500);
+    }, 400);
   };
 
-  // Handle Authenticator TOTP verification
+  // Handle Authenticator TOTP verification strictly on server
   const handleVerifyTotp = async (codeToVerify?: string) => {
-    const code = codeToVerify || totpCode;
+    const code = (codeToVerify || totpCode).trim();
     if (code.length !== 6) {
       setErrorMsg("Please enter the 6-digit authenticator code.");
       return;
@@ -151,40 +170,20 @@ export function MfaModal({
 
     setIsLoading(true);
     setErrorMsg(null);
+    setInfoMsg(null);
 
-    await new Promise((r) => setTimeout(r, 450));
-
-    const res = verifyTotp(code);
+    const res = await verifyServerTotp(effectiveUserId, code);
     setIsLoading(false);
 
     if (!res.success || !res.token) {
-      setErrorMsg(res.error || "Invalid code. Enter 6 digits or use 123456.");
+      setErrorMsg(res.error || "Invalid authenticator code.");
       return;
     }
 
     setSuccessAnim(true);
     setTimeout(() => {
       onSuccess(res.token!);
-    }, 500);
-  };
-
-  // Handle Biometric / Passkey verification
-  const handleVerifyPasskey = async () => {
-    setIsLoading(true);
-    setErrorMsg(null);
-
-    const res = await verifyPasskey();
-    setIsLoading(false);
-
-    if (!res.success || !res.token) {
-      setErrorMsg(res.error || "Biometric verification failed.");
-      return;
-    }
-
-    setSuccessAnim(true);
-    setTimeout(() => {
-      onSuccess(res.token!);
-    }, 500);
+    }, 400);
   };
 
   // Dynamic Header content based on actionType
@@ -221,10 +220,10 @@ export function MfaModal({
   const modalDesc =
     description ||
     (actionType === "connect_bank"
-      ? "Complete MFA to open Plaid and securely connect your financial institution."
+      ? "Complete server-verified MFA to authorize opening Plaid Link."
       : actionType === "remove_bank"
-        ? "MFA verification is required to remove this payment card or bank account."
-        : `Choose a second factor to verify your session for ${emailToUse}`);
+        ? "Server-verified MFA is required to remove this payment card or bank account."
+        : `Second factor verification required for ${emailToUse}`);
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col justify-end">
@@ -266,14 +265,15 @@ export function MfaModal({
           </p>
         </div>
 
-        {/* Factor Selector Tabs */}
+        {/* Factor Selector Tabs (Email OTP vs Authenticator TOTP) */}
         <div className="px-6 mb-3">
-          <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-muted/60 border border-border/40">
+          <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-muted/60 border border-border/40">
             <button
               type="button"
               onClick={() => {
                 setActiveTab("email_otp");
                 setErrorMsg(null);
+                setInfoMsg(null);
               }}
               className={`flex items-center justify-center gap-1.5 py-2 px-1 rounded-lg text-xs font-medium transition-all ${
                 activeTab === "email_otp"
@@ -290,6 +290,7 @@ export function MfaModal({
               onClick={() => {
                 setActiveTab("totp");
                 setErrorMsg(null);
+                setInfoMsg(null);
               }}
               className={`flex items-center justify-center gap-1.5 py-2 px-1 rounded-lg text-xs font-medium transition-all ${
                 activeTab === "totp"
@@ -298,23 +299,7 @@ export function MfaModal({
               }`}
             >
               <KeyRound className="w-3.5 h-3.5" />
-              <span>Authenticator</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("passkey");
-                setErrorMsg(null);
-              }}
-              className={`flex items-center justify-center gap-1.5 py-2 px-1 rounded-lg text-xs font-medium transition-all ${
-                activeTab === "passkey"
-                  ? "bg-background text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Fingerprint className="w-3.5 h-3.5" />
-              <span>Face ID</span>
+              <span>Authenticator App</span>
             </button>
           </div>
         </div>
@@ -325,25 +310,21 @@ export function MfaModal({
           {activeTab === "email_otp" && (
             <div className="flex flex-col items-center text-center space-y-4">
               <div className="bg-muted/40 rounded-xl px-4 py-2.5 text-xs text-muted-foreground border border-border/40 max-w-[340px]">
-                Enter the 6-digit code sent to{" "}
-                <span className="font-semibold text-foreground">{emailToUse}</span>
+                {isSendingEmail ? (
+                  <span className="flex items-center justify-center gap-2 text-foreground font-medium">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> Dispatching code to {emailToUse}...
+                  </span>
+                ) : (
+                  <>
+                    Enter the 6-digit code sent to{" "}
+                    <span className="font-semibold text-foreground">{emailToUse}</span>
+                  </>
+                )}
               </div>
 
-              {/* Demo Hint Badge */}
-              {demoCodeHint && (
-                <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 text-xs">
-                  <span>Code:</span>
-                  <span className="font-mono font-bold tracking-wider">{demoCodeHint}</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOtpCode(demoCodeHint);
-                      handleVerifyEmail(demoCodeHint);
-                    }}
-                    className="underline text-[11px] font-medium ml-1 cursor-pointer hover:opacity-80"
-                  >
-                    Quick fill
-                  </button>
+              {infoMsg && !errorMsg && (
+                <div className="text-xs text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-3 py-1.5 rounded-lg border border-emerald-500/20 max-w-[340px]">
+                  {infoMsg}
                 </div>
               )}
 
@@ -359,7 +340,7 @@ export function MfaModal({
                       handleVerifyEmail(val);
                     }
                   }}
-                  disabled={isLoading || successAnim}
+                  disabled={isLoading || isSendingEmail || successAnim}
                 >
                   <InputOTPGroup>
                     <InputOTPSlot index={0} className="w-11 h-12 text-lg font-bold" />
@@ -381,7 +362,8 @@ export function MfaModal({
                   <button
                     type="button"
                     onClick={handleResend}
-                    className="text-foreground font-semibold underline underline-offset-2 hover:opacity-80 transition-opacity cursor-pointer"
+                    disabled={isSendingEmail}
+                    className="text-foreground font-semibold underline underline-offset-2 hover:opacity-80 transition-opacity cursor-pointer disabled:opacity-50"
                   >
                     Resend code
                   </button>
@@ -413,23 +395,25 @@ export function MfaModal({
             <div className="flex flex-col items-center text-center space-y-4">
               <div className="bg-muted/40 rounded-xl p-3 text-xs text-muted-foreground border border-border/40 max-w-[340px] text-left">
                 <p className="font-semibold text-foreground mb-1">Google Authenticator / 1Password / Authy</p>
-                <p>Enter the 6-digit rolling security code from your authenticator app.</p>
+                <p>Enter the 6-digit rolling code generated for your Paidly account.</p>
 
-                <div className="mt-2.5 pt-2 border-t border-border/50 flex items-center justify-between">
-                  <span className="font-mono text-[11px] text-muted-foreground">Secret: {getTotpSecret()}</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(getTotpSecret());
-                      setCopiedSecret(true);
-                      setTimeout(() => setCopiedSecret(false), 2000);
-                    }}
-                    className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
-                    title="Copy Secret"
-                  >
-                    {copiedSecret ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
-                  </button>
-                </div>
+                {totpSecret && (
+                  <div className="mt-2.5 pt-2 border-t border-border/50 flex items-center justify-between">
+                    <span className="font-mono text-[11px] text-muted-foreground">Key: {totpSecret}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(totpSecret);
+                        setCopiedSecret(true);
+                        setTimeout(() => setCopiedSecret(false), 2000);
+                      }}
+                      className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+                      title="Copy Secret"
+                    >
+                      {copiedSecret ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* TOTP Input Slots */}
@@ -457,10 +441,6 @@ export function MfaModal({
                 </InputOTP>
               </div>
 
-              <p className="text-[11px] text-muted-foreground">
-                Tip: Enter any 6-digit code or <span className="font-mono font-semibold text-foreground">123456</span> to test.
-              </p>
-
               <Button
                 type="button"
                 onClick={() => handleVerifyTotp()}
@@ -480,47 +460,9 @@ export function MfaModal({
             </div>
           )}
 
-          {/* TAB 3: FACE ID / PASSKEY */}
-          {activeTab === "passkey" && (
-            <div className="flex flex-col items-center text-center space-y-4 py-2">
-              <div className="w-20 h-20 rounded-full bg-primary/10 text-primary flex items-center justify-center my-2 animate-pulse">
-                <Fingerprint className="w-10 h-10 stroke-[1.8]" />
-              </div>
-
-              <div className="max-w-[300px]">
-                <h3 className="text-sm font-semibold text-foreground">
-                  Biometric Verification
-                </h3>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Authenticate securely using Apple Face ID, Touch ID, or Android Biometric Passkey.
-                </p>
-              </div>
-
-              <Button
-                type="button"
-                onClick={handleVerifyPasskey}
-                disabled={isLoading || successAnim}
-                className="w-full h-12 rounded-xl font-semibold flex items-center justify-center gap-2 mt-2"
-              >
-                {isLoading ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : successAnim ? (
-                  <span className="flex items-center gap-1.5 text-emerald-500">
-                    <CheckCircle2 className="w-4 h-4" /> Biometric Confirmed
-                  </span>
-                ) : (
-                  <>
-                    <Fingerprint className="w-4 h-4" />
-                    <span>Scan Face ID / Use Passkey</span>
-                  </>
-                )}
-              </Button>
-            </div>
-          )}
-
           {/* Error Message */}
           {errorMsg && (
-            <div className="mt-3 p-2.5 rounded-lg bg-destructive/10 text-destructive text-xs flex items-center gap-2">
+            <div className="mt-3 p-2.5 rounded-lg bg-destructive/10 text-destructive text-xs flex items-center gap-2 text-left">
               <AlertCircle className="w-4 h-4 shrink-0" />
               <span>{errorMsg}</span>
             </div>

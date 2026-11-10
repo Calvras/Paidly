@@ -31,6 +31,7 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { SubscriptionDetail } from '@/components/subscription-detail'
 import { createLinkTokenFn, exchangePublicTokenFn } from '@/lib/plaid-api'
+import { removeBankCardFn } from '@/lib/mfa-api'
 import { MfaModal } from '@/components/mfa-modal'
 import { isMfaVerified } from '@/lib/mfa'
 import {
@@ -777,11 +778,32 @@ export function MobileProfile() {
     setShowDeleteMfa(true)
   }
 
-  const handleDeleteMfaSuccess = (_token: string) => {
+  const handleDeleteMfaSuccess = async (mfaToken: string) => {
     setShowDeleteMfa(false)
-    if (cardPendingDelete) {
-      executeDeleteCard(cardPendingDelete)
-      setCardPendingDelete(null)
+    if (!cardPendingDelete) return
+    const cardIdToRemove = cardPendingDelete
+    setCardPendingDelete(null)
+
+    // Strict server-side verification using HMAC JWT
+    try {
+      const res = await removeBankCardFn({
+        data: {
+          cardId: cardIdToRemove,
+          mfaToken,
+          userId: profile.email || 'user@example.com',
+        },
+      })
+
+      if (res.error) {
+        console.error('Server rejected bank card removal:', res.error)
+        alert(res.error)
+        return
+      }
+
+      executeDeleteCard(cardIdToRemove)
+    } catch (err: any) {
+      console.error('Error communicating with removal endpoint:', err)
+      alert('Failed to authorize bank card removal on server.')
     }
   }
 
@@ -1236,6 +1258,90 @@ export function MobileProfile() {
                 <Mail className="w-4 h-4" />
                 Contact Support Team
               </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+            {/* Security & MFA Settings Modal */}
+      {activeModal === 'security-mfa' && (
+        <div className="fixed inset-0 z-50 flex flex-col justify-end">
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-xs" onClick={() => setActiveModal(null)} />
+          <div className="relative z-50 w-full max-w-[420px] mx-auto bg-background rounded-t-[28px] p-6 shadow-2xl border-t border-border animate-in slide-in-from-bottom duration-300 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-emerald-500" />
+                <h2 className="text-base font-bold">Two-Factor Authentication</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveModal(null)}
+                className="p-1 rounded-full hover:bg-accent text-foreground"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3.5 text-xs text-muted-foreground">
+              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-700 dark:text-emerald-300">
+                <p className="font-semibold text-foreground flex items-center gap-1.5">
+                  <Check className="w-4 h-4 text-emerald-500" />
+                  MFA Protection Active
+                </p>
+                <p className="mt-1 text-[11px] leading-relaxed">
+                  Your account is protected by server-verified Multi-Factor Authentication with signed HMAC-SHA256 session tokens.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between p-2.5 rounded-xl bg-muted/40 border border-border/50">
+                  <div>
+                    <p className="font-semibold text-foreground">Email One-Time Code</p>
+                    <p className="text-[11px]">Server-hashed, 10-min expiry, max 5 attempts</p>
+                  </div>
+                  <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-500/10 px-2 py-0.5 rounded-full">
+                    Active
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between p-2.5 rounded-xl bg-muted/40 border border-border/50">
+                  <div>
+                    <p className="font-semibold text-foreground">Authenticator App (TOTP)</p>
+                    <p className="text-[11px]">RFC 6238, AES-256-GCM encrypted server-side</p>
+                  </div>
+                  <span className="text-[10px] font-semibold text-primary bg-primary/10 px-2 py-0.5 rounded-full">
+                    Active
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between p-2.5 rounded-xl bg-muted/40 border border-border/50">
+                  <div>
+                    <p className="font-semibold text-foreground">Plaid Link Authorization</p>
+                    <p className="text-[11px]">createLinkToken verified server-side</p>
+                  </div>
+                  <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-500/10 px-2 py-0.5 rounded-full">
+                    Enforced
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between p-2.5 rounded-xl bg-muted/40 border border-border/50">
+                  <div>
+                    <p className="font-semibold text-foreground">Bank Account Removal</p>
+                    <p className="text-[11px]">Requires step-up MFA verification</p>
+                  </div>
+                  <span className="text-[10px] font-semibold text-emerald-600 bg-emerald-500/10 px-2 py-0.5 rounded-full">
+                    Enforced
+                  </span>
+                </div>
+              </div>
+
+              <Button
+                type="button"
+                onClick={() => setActiveModal(null)}
+                className="welcome-primary w-full h-11 mt-2"
+              >
+                Done
+              </Button>
             </div>
           </div>
         </div>
