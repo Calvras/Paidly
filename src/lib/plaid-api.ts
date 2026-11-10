@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import type { CardItem, SubscriptionItem } from "@/lib/cards-store";
+import { validateMfaServerToken } from "@/lib/mfa";
 
 const PLAID_CLIENT_ID = process.env.PLAID_CLIENT_ID;
 const PLAID_SECRET = process.env.PLAID_SECRET;
@@ -7,8 +8,19 @@ const PLAID_ENV = process.env.PLAID_ENV || "sandbox";
 const PLAID_BASE_URL = `https://${PLAID_ENV}.plaid.com`;
 
 // 1. Create Link Token for opening Plaid Link modal in the browser
-export const createLinkTokenFn = createServerFn({ method: "POST" }).handler(
-  async () => {
+// BLOCKED UNLESS MFA-VERIFIED
+export const createLinkTokenFn = createServerFn({ method: "POST" })
+  .validator((data?: { mfaToken?: string }) => data)
+  .handler(async ({ data }) => {
+    // Strict MFA enforcement
+    const mfaToken = data?.mfaToken;
+    if (!mfaToken || !validateMfaServerToken(mfaToken)) {
+      console.warn("[Security] Plaid createLinkToken blocked: session is not MFA-verified");
+      return {
+        error: "Multi-Factor Authentication (MFA) required. Please verify your identity before opening bank link.",
+      };
+    }
+
     try {
       const response = await fetch(`${PLAID_BASE_URL}/link/token/create`, {
         method: "POST",
@@ -24,25 +36,34 @@ export const createLinkTokenFn = createServerFn({ method: "POST" }).handler(
         }),
       });
 
-      const data = await response.json();
+      const resData = await response.json();
       if (!response.ok) {
-        console.error("Plaid link token error:", data);
-        return { error: data.error_message || "Failed to create link token" };
+        console.error("Plaid link token error:", resData);
+        return { error: resData.error_message || "Failed to create link token" };
       }
 
-      return { link_token: data.link_token as string };
+      return { link_token: resData.link_token as string };
     } catch (err: any) {
       console.error("Plaid link token network error:", err);
       return { error: err.message || "Network error communicating with Plaid" };
     }
-  },
-);
+  });
 
 // 2. Exchange public_token for access_token, then fetch real accounts and detected subscriptions
+// Also validates MFA token for bank synchronization
 export const exchangePublicTokenFn = createServerFn({ method: "POST" })
-  .validator((data: { public_token: string; institution_name?: string }) => data)
+  .validator((data: { public_token: string; institution_name?: string; mfaToken?: string }) => data)
   .handler(async ({ data }) => {
-    const { public_token, institution_name } = data;
+    const { public_token, institution_name, mfaToken } = data;
+
+    // Strict MFA enforcement
+    if (!mfaToken || !validateMfaServerToken(mfaToken)) {
+      console.warn("[Security] Plaid exchangePublicToken blocked: missing or invalid MFA token");
+      return {
+        error: "Multi-Factor Authentication (MFA) required to complete bank connection.",
+      };
+    }
+
     try {
       // Step A: Exchange public token
       const exchangeRes = await fetch(

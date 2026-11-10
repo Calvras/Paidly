@@ -31,6 +31,8 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { SubscriptionDetail } from '@/components/subscription-detail'
 import { createLinkTokenFn, exchangePublicTokenFn } from '@/lib/plaid-api'
+import { MfaModal } from '@/components/mfa-modal'
+import { isMfaVerified } from '@/lib/mfa'
 import {
   getStoredCards,
   saveStoredCards,
@@ -226,11 +228,23 @@ function AddCardModal({
 
   if (!isOpen) return null
 
-  const handlePlaidConnect = async () => {
+  const [showPlaidMfa, setShowPlaidMfa] = useState(false)
+
+  // Re-prompt MFA before initiating Plaid Link connection
+  const handlePlaidConnectClick = () => {
+    setShowPlaidMfa(true)
+  }
+
+  const handlePlaidMfaSuccess = async (mfaToken: string) => {
+    setShowPlaidMfa(false)
+    await executePlaidConnect(mfaToken)
+  }
+
+  const executePlaidConnect = async (mfaToken: string) => {
     setIsPlaidLoading(true)
     setPlaidError(null)
     try {
-      const res = await createLinkTokenFn()
+      const res = await createLinkTokenFn({ data: { mfaToken } })
       if (res.error || !res.link_token) {
         setPlaidError(res.error || 'Failed to start bank connection')
         setIsPlaidLoading(false)
@@ -251,6 +265,7 @@ function AddCardModal({
             data: {
               public_token,
               institution_name: metadata?.institution?.name,
+              mfaToken,
             },
           })
 
@@ -340,10 +355,10 @@ function AddCardModal({
           </button>
         </div>
 
-        {/* Plaid Option */}
+        {/* Plaid Option with MFA Re-prompt */}
         <Button
           type="button"
-          onClick={handlePlaidConnect}
+          onClick={handlePlaidConnectClick}
           disabled={isPlaidLoading}
           className="welcome-primary w-full h-11 bg-primary text-primary-foreground font-semibold flex items-center justify-center gap-2 text-xs mb-3 cursor-pointer"
         >
@@ -356,9 +371,21 @@ function AddCardModal({
             <>
               <Building2 className="w-4 h-4" />
               <span>Connect via Bank (Plaid)</span>
+              <span className="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-primary-foreground/20 text-primary-foreground font-medium">
+                <ShieldCheck className="w-3 h-3" />
+                MFA Protected
+              </span>
             </>
           )}
         </Button>
+
+        {/* MFA Re-Prompt Modal for Plaid Bank Link */}
+        <MfaModal
+          isOpen={showPlaidMfa}
+          onClose={() => setShowPlaidMfa(false)}
+          onSuccess={handlePlaidMfaSuccess}
+          actionType="connect_bank"
+        />
 
         {plaidError && (
           <p className="text-xs text-destructive text-center bg-destructive/10 p-2 rounded-lg mb-3">
@@ -741,7 +768,24 @@ export function MobileProfile() {
     saveStoredCards(updated)
   }
 
-  const handleDeleteCard = (id: string) => {
+  const [cardPendingDelete, setCardPendingDelete] = useState<string | null>(null)
+  const [showDeleteMfa, setShowDeleteMfa] = useState(false)
+
+  // Sensitive action: Re-prompt MFA before removing a card or connected bank
+  const requestDeleteCard = (id: string) => {
+    setCardPendingDelete(id)
+    setShowDeleteMfa(true)
+  }
+
+  const handleDeleteMfaSuccess = (_token: string) => {
+    setShowDeleteMfa(false)
+    if (cardPendingDelete) {
+      executeDeleteCard(cardPendingDelete)
+      setCardPendingDelete(null)
+    }
+  }
+
+  const executeDeleteCard = (id: string) => {
     if (cards.length <= 1) return
     const updated = cards.filter((c) => c.id !== id)
     if (!updated.some((c) => c.isDefault)) {
@@ -849,6 +893,21 @@ export function MobileProfile() {
             <CreditCard />
           </span>
           Payment Methods
+          <ChevronRight className="row-chevron" />
+        </Button>
+
+        <Button
+          variant="ghost"
+          className="profile-row cursor-pointer"
+          onClick={() => setActiveModal('security-mfa')}
+        >
+          <span className="profile-row-icon">
+            <ShieldCheck className="text-emerald-500" />
+          </span>
+          Two-Factor & Security
+          <span className="ml-auto text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full mr-2">
+            Active
+          </span>
           <ChevronRight className="row-chevron" />
         </Button>
 
@@ -1048,9 +1107,10 @@ export function MobileProfile() {
                     {cards.length > 1 && (
                       <button
                         type="button"
-                        onClick={() => handleDeleteCard(c.id)}
+                        onClick={() => requestDeleteCard(c.id)}
                         className="p-1.5 text-muted-foreground hover:text-destructive rounded-md"
                         aria-label="Delete card"
+                        title="Remove bank/card (MFA Protected)"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -1115,6 +1175,16 @@ export function MobileProfile() {
               </form>
             )}
           </div>
+          {/* MFA Re-Prompt Modal for sensitive bank card deletion */}
+          <MfaModal
+            isOpen={showDeleteMfa}
+            onClose={() => {
+              setShowDeleteMfa(false)
+              setCardPendingDelete(null)
+            }}
+            onSuccess={handleDeleteMfaSuccess}
+            actionType="remove_bank"
+          />
         </div>
       )}
 

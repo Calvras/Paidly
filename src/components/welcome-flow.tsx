@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from '@tanstack/react-router'
-import { ArrowLeft, ArrowRight, Building2, Check, CreditCard, Eye, EyeOff, Loader2 } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Building2, Check, CreditCard, Eye, EyeOff, Loader2, ShieldCheck, Lock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Checkbox } from '@/components/ui/checkbox'
 import { LegalModal, type LegalDocType } from '@/components/legal-modal'
+import { MfaModal } from '@/components/mfa-modal'
+import { isMfaVerified } from '@/lib/mfa'
 import {
   isUserLoggedIn,
   setStoredAuth,
@@ -184,16 +186,66 @@ export function AuthScreen() {
   const [forgot, setForgot] = useState(false)
   const [sent, setSent] = useState(false)
   const [agreed, setAgreed] = useState(false)
-  const [name, setName] = useState('Daniel Smith')
-  const [email, setEmail] = useState('daniel@example.com')
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [legalDoc, setLegalDoc] = useState<LegalDocType>(null)
+  const [showMfaModal, setShowMfaModal] = useState(false)
 
   useEffect(() => {
-    if (isUserLoggedIn()) {
+    if (isUserLoggedIn() && isMfaVerified()) {
       navigate({ to: '/home', replace: true })
     }
   }, [navigate])
+
+  const handleMfaSuccess = (_token: string) => {
+    setShowMfaModal(false)
+    setStoredAuth(true)
+
+    const cleanEmail = email.trim() || 'user@example.com'
+    const cleanName = name.trim() || 'Account Holder'
+    const initials =
+      cleanName
+        .split(' ')
+        .map((w) => w[0])
+        .slice(0, 2)
+        .join('')
+        .toUpperCase() || 'AH'
+
+    saveStoredProfile({
+      name: cleanName,
+      email: cleanEmail,
+      phone: '+1 (555) 019-2834',
+      initials,
+    })
+
+    if (login) {
+      navigate({ to: '/home', replace: true })
+    } else {
+      navigate({ to: '/connect-card' })
+    }
+  }
+
+  const handleFormSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (forgot) {
+      setSent(true)
+      return
+    }
+    if (!email.trim()) {
+      setErrorMsg('Please enter your email address.')
+      return
+    }
+    if (!login && !agreed) {
+      setErrorMsg('Please confirm you are 18+ and accept the Terms to continue.')
+      return
+    }
+    setErrorMsg(null)
+
+    // Second Factor required at login and registration
+    setShowMfaModal(true)
+  }
 
   return (
     <main className="mobile-screen onboarding-screen">
@@ -206,7 +258,7 @@ export function AuthScreen() {
           {forgot
             ? 'Enter your email to receive recovery instructions.'
             : login
-              ? 'Good to see you again.'
+              ? 'Good to see you again. Multi-factor protection is active.'
               : 'Keep everything you subscribe to, together.'}
         </p>
       </div>
@@ -226,44 +278,7 @@ export function AuthScreen() {
           </Button>
         </div>
       ) : (
-        <form
-          className="onboarding-form"
-          onSubmit={(e) => {
-            e.preventDefault()
-            if (forgot) {
-              setSent(true)
-              return
-            }
-            if (login) {
-              setStoredAuth(true)
-              navigate({ to: '/home', replace: true })
-              return
-            }
-            if (!agreed) {
-              setErrorMsg('Please confirm you are 18+ and accept the Terms to continue.')
-              return
-            }
-            setErrorMsg(null)
-            setStoredAuth(true)
-            if (name.trim()) {
-              const initials =
-                name
-                  .trim()
-                  .split(' ')
-                  .map((w) => w[0])
-                  .slice(0, 2)
-                  .join('')
-                  .toUpperCase() || 'DS'
-              saveStoredProfile({
-                name: name.trim(),
-                email: email.trim() || 'daniel@example.com',
-                phone: '+1 (555) 019-2834',
-                initials,
-              })
-            }
-            navigate({ to: '/connect-card' })
-          }}
-        >
+        <form className="onboarding-form" onSubmit={handleFormSubmit}>
           {!login && !forgot && (
             <label className="welcome-field">
               Full name
@@ -272,7 +287,7 @@ export function AuthScreen() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 autoComplete="name"
-                placeholder="Daniel Smith"
+                placeholder="Your full name"
               />
             </label>
           )}
@@ -284,7 +299,7 @@ export function AuthScreen() {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               autoComplete="email"
-              placeholder="daniel@example.com"
+              placeholder="name@example.com"
             />
           </label>
           {!forgot && (
@@ -295,6 +310,8 @@ export function AuthScreen() {
                   type={visible ? 'text' : 'password'}
                   required
                   minLength={6}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
                   autoComplete="current-password"
                   placeholder="At least 6 characters"
                 />
@@ -361,7 +378,7 @@ export function AuthScreen() {
             </Button>
           )}
           <Button type="submit" className="welcome-primary">
-            {forgot ? 'Send reset link' : login ? 'Log in' : 'Create account'}
+            {forgot ? 'Send reset link' : login ? 'Continue with MFA' : 'Create account'}
             <ArrowRight />
           </Button>
         </form>
@@ -396,6 +413,15 @@ export function AuthScreen() {
 
       {/* Swipe-up Legal Modal */}
       <LegalModal type={legalDoc} onClose={() => setLegalDoc(null)} />
+
+      {/* Second Factor MFA Modal */}
+      <MfaModal
+        isOpen={showMfaModal}
+        onClose={() => setShowMfaModal(false)}
+        onSuccess={handleMfaSuccess}
+        actionType="login"
+        targetEmail={email || undefined}
+      />
     </main>
   )
 }
@@ -425,12 +451,23 @@ export function ConnectCardScreen() {
     return undefined
   }, [stage, progress])
 
-  // Handle Plaid Live Bank Connection
-  const handleConnectPlaid = async () => {
+  const [showPlaidMfaModal, setShowPlaidMfaModal] = useState(false)
+
+  // Re-prompt MFA before opening Plaid Link for sensitive bank connection
+  const handleConnectPlaidClick = () => {
+    setShowPlaidMfaModal(true)
+  }
+
+  const handlePlaidMfaSuccess = async (mfaToken: string) => {
+    setShowPlaidMfaModal(false)
+    await executePlaidConnect(mfaToken)
+  }
+
+  const executePlaidConnect = async (mfaToken: string) => {
     setIsPlaidLoading(true)
     setPlaidError(null)
     try {
-      const tokenRes = await createLinkTokenFn()
+      const tokenRes = await createLinkTokenFn({ data: { mfaToken } })
       if (tokenRes.error || !tokenRes.link_token) {
         setPlaidError(tokenRes.error || 'Could not connect to bank authentication servers.')
         setIsPlaidLoading(false)
@@ -451,6 +488,7 @@ export function ConnectCardScreen() {
             data: {
               public_token,
               institution_name: metadata?.institution?.name,
+              mfaToken,
             },
           })
 
@@ -552,10 +590,10 @@ export function ConnectCardScreen() {
 
       {stage === 'entry' ? (
         <div className="space-y-4">
-          {/* Primary Option: Real Plaid Bank Link */}
+          {/* Primary Option: Real Plaid Bank Link with MFA Re-prompt */}
           <Button
             type="button"
-            onClick={handleConnectPlaid}
+            onClick={handleConnectPlaidClick}
             disabled={isPlaidLoading}
             className="welcome-primary w-full h-12 bg-primary text-primary-foreground font-semibold flex items-center justify-center gap-2 text-xs shadow-sm hover:bg-primary/95 transition-all"
           >
@@ -568,7 +606,11 @@ export function ConnectCardScreen() {
               <>
                 <Building2 className="w-4 h-4" />
                 <span>Connect with Bank (Plaid)</span>
-                <ArrowRight className="w-3.5 h-3.5 ml-auto opacity-75" />
+                <span className="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-primary-foreground/20 text-primary-foreground font-medium">
+                  <ShieldCheck className="w-3 h-3" />
+                  MFA Protected
+                </span>
+                <ArrowRight className="w-3.5 h-3.5 opacity-75" />
               </>
             )}
           </Button>
